@@ -1,4 +1,8 @@
 import os
+import time
+import json
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify
 from typing import List, Dict, Any, Optional
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -231,27 +235,57 @@ class FAQBot:
         }
 
 
+# Initialize Flask app
+app = Flask(__name__, static_folder='static', template_folder='templates')
+app.config['JSON_SORT_KEYS'] = False  # Keep the order of dictionary keys
+
+# Initialize the FAQ bot
+bot = None
+
+def get_bot():
+    global bot
+    if bot is None:
+        print("Initializing FAQ Bot...")
+        bot = FAQBot()
+    return bot
+
+@app.route('/')
+def home():
+    # Initialize the bot when the home page is first accessed
+    get_bot()
+    return render_template('index.html')
+
+@app.route('/ask', methods=['POST'])
+def ask():
+    data = request.get_json()
+    query = data.get('query', '').strip()
+    
+    if not query:
+        return jsonify({
+            'answer': 'Please provide a valid query.',
+            'source': '',
+            'related_queries': [],
+            'response_time': 0
+        })
+    
+    start_time = time.time()
+    try:
+        bot_instance = get_bot()
+        response = bot_instance.process_query(query)
+    except Exception as e:
+        print(f"Error processing query: {str(e)}")
+        return jsonify({
+            'answer': 'Sorry, I encountered an error processing your request. Please try again later.',
+            'source': '',
+            'related_queries': [],
+            'response_time': 0
+        })
+    end_time = time.time()
+    
+    response['response_time'] = (end_time - start_time) * 1000  # Convert to milliseconds
+    return jsonify(response)
+
 if __name__ == "__main__":
-    bot = FAQBot()
-    
-    queries = [
-        "How do I update my KYC details?",
-        "What are the rewards for using Jupiter card?",
-        "How to transfer money to another bank account?",
-        "Mera card block ho gaya hai, kya karu?"
-    ]
-    
-    for query in queries:
-        print(f"\nUser: {query}")
-        start_time = time.time()
-        response = bot.process_query(query)
-        end_time = time.time()
-        
-        print(f"Bot: {response['answer']}")
-        if response['source']:
-            print(f"Source: {response['source']}")
-        if response['related_queries']:
-            print("\nRelated queries:")
-            for i, rq in enumerate(response['related_queries'], 1):
-                print(f"{i}. {rq}")
-        print(f"Response time: {end_time - start_time:.2f} seconds")
+    print("Starting FAQ Bot web server...")
+    port = int(os.environ.get('PORT', 8980))
+    app.run(host='0.0.0.0', port=port, debug=os.environ.get('FLASK_DEBUG', 'true').lower() == 'true')

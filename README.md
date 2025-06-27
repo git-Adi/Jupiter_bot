@@ -17,6 +17,70 @@ This project implements a FAQ bot for Jupiter Money that can answer user queries
 - Ollama (local LLM)
 - Pinecone account (for vector database)
 
+## Web Interface
+
+The FAQ bot comes with a modern web interface that can be accessed at `http://localhost:8980` when running locally.
+
+### Local Development
+
+1. Install the required packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Set up your environment variables in a `.env` file:
+   ```
+   PINECONE_API_KEY=your_pinecone_api_key
+   PINECONE_INDEX_NAME=your_pinecone_index_name
+   ```
+
+3. Run the development server:
+   ```bash
+   python faq_bot.py
+   ```
+
+4. Open your browser and navigate to `http://localhost:8980`
+
+## Deployment
+
+### Deploying to Render.com
+
+1. **Create a Render.com account**
+   - Go to [render.com](https://render.com/) and sign up if you don't have an account
+
+2. **Create a new Web Service**
+   - Click "New" and select "Web Service"
+   - Connect your GitHub/GitLab repository or use the Render CLI
+
+3. **Configure your service**
+   - Name: `jupiter-faq-bot`
+   - Region: Choose the one closest to your users
+   - Branch: `main` (or your preferred branch)
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `gunicorn faq_bot:app`
+
+4. **Set up environment variables**
+   - `PYTHON_VERSION`: `3.10.13`
+   - `PINECONE_API_KEY`: Your Pinecone API key
+   - `PINECONE_INDEX_NAME`: Your Pinecone index name
+   - `FLASK_DEBUG`: `false` (for production)
+
+5. **Deploy**
+   - Click "Create Web Service"
+   - Render will automatically build and deploy your application
+
+6. **Access your application**
+   - Once deployed, you'll get a URL like `https://jupiter-faq-bot.onrender.com`
+
+### Environment Variables
+
+For production, make sure to set these environment variables:
+
+- `PINECONE_API_KEY`: Your Pinecone API key
+- `PINECONE_INDEX_NAME`: Your Pinecone index name
+- `PORT`: (Optional) Port to run the application on (default: 8980)
+- `FLASK_DEBUG`: Set to `false` in production
+
 ## Installation
 
 1. **Clone the repository**

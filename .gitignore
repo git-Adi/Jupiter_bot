@@ -8,6 +8,34 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+
+# Virtual environment
+venv/
+ENV/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Local development
+.DS_Store
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
 downloads/
 eggs/
 .eggs/
