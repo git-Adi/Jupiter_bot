@@ -1,0 +1,67 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables
+.env
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Local development
+*.log
+
+# System Files
+.DS_Store
+Thumbs.db
+
+
+process_forum_urls.py
+process_urls.py
+jupiter_faqs.pt
+crawl4ai/crawl4ai/ollama_summarizer.py 
+jupiter_faiss_index.pt 
+forum_posts_1750880075.json
+initial_knowledge.json
+final_content1.json
+final_content.json
+AI_internship_Jupiter.pdf
+crawl4ai/crawl4ai/run_sample.py
+crawl4ai/crawl4ai/run.py
+crawl4ai/crawl4ai/run1.py
+crawl4ai/crawl4ai/run2.py
+crawl4ai/crawl4ai/test.py
+crawl4ai/test_playwright.py
+crawl4ai/summarizer.py
+
+
+
