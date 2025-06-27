@@ -1,1 +1,1 @@
-web: gunicorn faq_bot:app
+web: gunicorn wsgi:app
