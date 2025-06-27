@@ -22,8 +22,8 @@ This project implements a FAQ bot for Jupiter Money that can answer user queries
 1. **Clone the repository**
 
    ```bash
-   git clone <repository-url>
-   cd jupiter_intern
+   git clone https://github.com/git-Adi/Jupiter_bot.git
+
    ```
 
 2. **Create and activate a virtual environment (recommended)**
@@ -78,7 +78,7 @@ This will save the URLs to `extracted_urls.txt`.
 #### For all URLs:
 
 ```bash
-python crawl4ai/crawl4ai/ollama_only_summarizer.py
+python crawl4ai/ollama_only_summarizer.py
 ```
 
 This processes all URLs from `extracted_urls.txt` and saves the content to `final_content.json`.
@@ -86,7 +86,7 @@ This processes all URLs from `extracted_urls.txt` and saves the content to `fina
 #### For specific URLs:
 
 ```bash
-python crawl4ai/crawl4ai/ollama_only_summarizer_new.py
+python crawl4ai/ollama_only_summarizer_new.py
 ```
 
 This processes specific policy-related URLs and saves the content to `final_content1.json`.
