@@ -7,4 +7,5 @@ gunicorn==21.2.0
 python-dotenv==1.0.0
 ollama==0.1.5
 langdetect==1.0.9
+translate==3.6.1
 pinecone
