@@ -1,12 +1,14 @@
-from dotenv import load_dotenv
 import os
+import sys
 
-# Load environment variables from .env file if it exists
-load_dotenv()
+# Add the project directory to the path
+path = os.path.dirname(os.path.abspath(__file__))
+if path not in sys.path:
+    sys.path.append(path)
 
-# Import app after loading environment variables
-from faq_bot import app
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv(os.path.join(path, '.env'))
 
-if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 8980))
-    app.run(host='0.0.0.0', port=port)
+# Import the Flask app
+from faq_bot import app as application  # noqa
