@@ -50,3 +50,6 @@ safetensors>=0.4.0
 # Pinecone
 pinecone
 huggingface-hub
+
+# Web server
+gunicorn>=20.1.0
