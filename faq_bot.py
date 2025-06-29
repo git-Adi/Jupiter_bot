@@ -105,28 +105,45 @@ class FAQBot:
         return results.matches if hasattr(results, 'matches') else []
     
     def generate_response(self, query: str, context: str, language: str = "en") -> str:
-        # Prompting
-        prompt = f"""You are a helpful assistant for Jupiter's FAQ system. 
-        Use the following context to answer the question. If you don't know the answer, say so.
-        
-        Context: {context}
-        
-        Question: {query}
-        
-        Answer in a friendly, conversational tone:"""
-        
+        """Generate a response using the LLM with fallback to simple response."""
         try:
-            response = ollama.chat(
-                model='llama3',
-                messages=[{'role': 'user', 'content': prompt}]
-            )
-            answer = response['message']['content']
-            
-            
-            if language != "en":
-                answer = self.translate_from_english(answer, language)
+            # First try to get a response from the vector database
+            if context and context.strip() != '':
+                prompt = f"""
+                You are a helpful customer support assistant for a bank.
+                Use the following context to answer the question. If you don't know the answer, say so.
                 
-            return answer
+                Context: {context}
+                
+                Question: {query}
+                
+                Answer in a friendly, conversational tone:"""
+                
+                try:
+                    response = ollama.chat(
+                        model='llama3',
+                        messages=[{'role': 'user', 'content': prompt}],
+                        options={'timeout': 30}  # Add timeout
+                    )
+                    answer = response['message']['content']
+                    
+                    if language != "en":
+                        answer = self.translate_from_english(answer, language)
+                        
+                    return answer
+                except Exception as e:
+                    print(f"Error calling Ollama: {str(e)}")
+                    # Fall through to simple response
+            
+            # Fallback response if Ollama fails or no context
+            fallback_responses = [
+                "I'm sorry, I'm having trouble accessing the information right now. Please try again later.",
+                "I couldn't find a specific answer to your question in our knowledge base.",
+                "I'm still learning about that topic. Could you try rephrasing your question?"
+            ]
+            import random
+            return random.choice(fallback_responses)
+            
         except Exception as e:
             print(f"Error generating response: {e}")
             return "I'm sorry, I'm having trouble generating a response right now."
@@ -152,87 +169,83 @@ class FAQBot:
         return [q for q, _ in similarities[:top_n] if q.lower() != query.lower()]
     
     def process_query(self, query: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-        if user_id:
-            self.user_id = user_id
-            
-        # Add to query history (trim if too long)
-        self.query_history[self.user_id].append(query[:1000])  
+        """Process a user query and return the response with enhanced error handling."""
+        if not query or not query.strip():
+            return {
+                "answer": "I didn't receive your question. Could you please ask again?",
+                "source": None,
+                "related_queries": []
+            }
         
-        try: #language detection
-            detected_lang = self.detect_language(query)
-            if detected_lang != "en":
-                translated_query = self.translate_to_english(query, detected_lang)
-            else:
-                translated_query = query
-        except Exception as e:
-            print(f"Language detection/translation error: {e}")
-            detected_lang = "en"
-            translated_query = query
-            
-        # Getting semantic search results
-        search_results = self.semantic_search(translated_query, self.top_k)
-        
-        # Filtering results using score threshold
-        relevant_results = [
-            r for r in search_results 
-            if hasattr(r, 'score') and r.score >= self.score_threshold
-        ]
-        
-        
-        related_queries = self.get_related_queries(translated_query[:500]) 
-        
-        if not relevant_results:
-            # If no relevant results, using LLM to generate a general response
+        try:
+            # Detect language
             try:
-                # Prompting
-                prompt = f"""Answer the following banking question concisely in 2-3 sentences. If you don't know the answer, say so.
-                
-                Question: {query[:400]}
-                
-                Answer:"""
-                
-                response = ollama.chat(
-                    model='llama3',
-                    messages=[{'role': 'user', 'content': prompt}],
-                    options={'max_tokens': 500} 
-                )
-                answer = response['message']['content'].strip()
-                
-                # Ensuring answer is not too long
-                if len(answer) > 2000:
-                    answer = answer[:2000] + "..."
-                
-                # Translating back to original language
-                if detected_lang != "en" and answer:
-                    answer = self.translate_from_english(answer, detected_lang)
-                    
-                return {
-                    "answer": answer,
-                    "source": None,
-                    "related_queries": related_queries[:3] 
-                }
+                language = self.detect_language(query)
+                # If not English, translate to English for processing
+                if language != "en":
+                    query_en = self.translate_to_english(query, language)
+                else:
+                    query_en = query
             except Exception as e:
-                print(f"Error generating response: {e}")
-                return {
-                    "answer": "I couldn't find a relevant answer to your question.",
-                    "source": None,
-                    "related_queries": related_queries[:3]
-                }
-        
-        # Preparing context from top results
-        context = "\n\n".join([
-            f"Source: {r.metadata.get('title', 'Unknown')}\nContent: {r.metadata.get('content', '')}"
-            for r in relevant_results
-        ])
-        
-        # Generating response using LLM with RAG context
-        answer = self.generate_response(translated_query, context, detected_lang)
-        
-        return {
-            "answer": answer,
-            "source": relevant_results[0].metadata.get('url', ''),
-            "related_queries": related_queries
-        }
+                print(f"Language detection/translation error: {e}")
+                query_en = query  # Fallback to original query
+                language = "en"
+            
+            # Get relevant context from vector DB
+            try:
+                results = self.semantic_search(query_en, top_k=self.top_k)
+                # Filter results by score threshold
+                filtered_results = [r for r in results if r.score >= self.score_threshold]
+            except Exception as e:
+                print(f"Vector search error: {e}")
+                filtered_results = []
+            
+            # If no good matches, try a more general search
+            if not filtered_results:
+                try:
+                    results = self.semantic_search(query_en, top_k=5)  # Try with more results
+                    filtered_results = [r for r in results if r.score >= (self.score_threshold * 0.8)]  # Lower threshold
+                except Exception as e:
+                    print(f"Fallback search error: {e}")
+            
+            context = ""
+            source = None
+            
+            if filtered_results:
+                # Get the most relevant result
+                best_match = filtered_results[0]
+                context = best_match.metadata.get('text', '')
+                source = best_match.metadata.get('source', None)
+            
+            # Generate response using LLM with the available context
+            answer = self.generate_response(query_en, context, language)
+            
+            # If we don't have a good answer, provide a helpful message
+            if not answer or "I couldn't find" in answer or "I'm sorry" in answer:
+                answer = "I couldn't find a specific answer to your question in our knowledge base. " \
+                        "Could you try rephrasing your question or ask about something else?"
+            
+            # Get related queries if we have some context
+            related_queries = []
+            if context:
+                try:
+                    related_queries = self.get_related_queries(query_en)[:3]  # Limit to 3 related queries
+                except Exception as e:
+                    print(f"Error getting related queries: {e}")
+            
+            return {
+                "answer": answer,
+                "source": source,
+                "related_queries": related_queries
+            }
+            
+        except Exception as e:
+            print(f"Unexpected error in process_query: {e}")
+            return {
+                "answer": "I'm experiencing some technical difficulties. Please try again in a moment.",
+                "source": None,
+                "related_queries": ["Try rephrasing your question", "Check back later"]
+            }
 
 
 # Initialize Flask app
