@@ -1,51 +1,29 @@
-# flask==2.3.3
-# flask-cors==4.0.0
-# sentence-transformers==2.2.2
-# pinecone-client>=2.2.4,<3.0.0
-# numpy==1.24.3
-# gunicorn==21.2.0
-# python-dotenv==1.0.0
-# langdetect==1.0.9
-# translate==3.6.1
-# requests==2.31.0
-# torch==1.13.1
-# transformers==4.30.2
-# huggingface-hub==0.16.4
-# ollama==0.1.5
-# requests==2.31.0
-# pinecone
-# accelerate>=0.20.0
-# bitsandbytes>=0.40.0
-# huggingface-hub>=0.16.4
-
+# Core web framework
 flask==2.3.3
 flask-cors==4.0.0
-sentence-transformers>=2.2.2
+gunicorn==21.2.0
+
+# Vector database
 pinecone-client>=2.2.4,<3.0.0
+
+# PyTorch - Install the appropriate version for your system
+torch>=2.0.0  # This will use the CPU-only version by default
+
+# Transformers and model tools
+transformers>=4.30.2
+accelerate>=0.25.0
+sentence-transformers>=2.2.2
+
+# Text processing
 numpy>=1.26.0
-python-dotenv==1.0.0
 langdetect==1.0.9
 translate==3.6.1
+
+# Environment and utilities
+python-dotenv==1.0.0
 requests==2.31.0
-
-# PyTorch with CPU/GPU support
-torch>=2.0.0
-
-# Transformers and model-related
-transformers>=4.36.0
-huggingface-hub>=0.19.4
-accelerate>=0.25.0
-bitsandbytes>=0.41.0
-
-tiktoken  # For token counting
-safetensors>=0.3.1
-bitsandbytes>=0.40.0
 safetensors>=0.4.0
-
-# Optional: Uncomment these if you have CUDA and want better performance
-# torch>=2.0.0+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
-# xformers>=0.0.22
-# flash-attn --no-build-isolation
+tiktoken  # For token counting
 
 # Pinecone
 pinecone

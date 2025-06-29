@@ -51,8 +51,8 @@ class FAQBot:
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.embedding_dim = 384  # Dimension for all-MiniLM-L6-v2
         
-        # Model configuration - Using GPT-2 for better compatibility with free tier
-        self.model_name = "gpt2"
+        # Model configuration
+        self.model_name = "microsoft/phi-2"
         print(f"Loading model: {self.model_name}")
         
         # Load tokenizer and model with error handling
@@ -60,51 +60,43 @@ class FAQBot:
             print("Loading tokenizer...")
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name,
-                padding_side='left',
-                pad_token='[PAD]'  # Explicitly set pad token
+                trust_remote_code=True
             )
             
-            print("Loading model...")
+            print("Loading model (this may take a moment, model is ~2.3GB)...")
             
-            # Configure model loading with device_map="auto" for automatic device management
-            print("Loading model with automatic device mapping...")
-            
-            # Determine the appropriate torch_dtype based on available hardware
-            if torch.backends.mps.is_available() or torch.cuda.is_available():
-                torch_dtype = torch.float16  # Use float16 for GPU/MPS
-            else:
-                torch_dtype = torch.float32  # Use float32 for CPU
-                
-            # Load the model with automatic device mapping
+            # Load model with bfloat16 precision for better stability
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                device_map="auto",  # Let accelerate handle device placement
-                torch_dtype=torch_dtype,
-                low_cpu_mem_usage=True
+                trust_remote_code=True,
+                device_map="auto",
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                low_cpu_mem_usage=True,
+                attn_implementation="sdpa"  # Use SDPA attention for better performance
             )
             
-            # Print the device being used
-            device = next(self.model.parameters()).device
-            print(f"Model loaded on device: {device}")
-            
-            # Set up the generation pipeline without specifying device (handled by accelerate)
+            # Set up the generation pipeline with more conservative parameters
             self.generator = pipeline(
                 "text-generation",
                 model=self.model,
                 tokenizer=self.tokenizer,
-                max_new_tokens=150,  # Shorter responses for faster generation
+                device_map="auto",
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                max_new_tokens=200,  # More conservative token limit
                 do_sample=True,
-                temperature=0.7,     # Balanced creativity
-                top_p=0.9,           # Nucleus sampling
-                top_k=50,            # Limit to top 50 tokens
-                repetition_penalty=1.2,  # Prevent repetition
+                temperature=0.3,     # Lower temperature for more focused outputs
+                top_p=0.9,           # Use nucleus sampling
+                top_k=40,            # Limit to top 40 tokens
+                repetition_penalty=1.15,  # Slightly higher to prevent repetition
                 pad_token_id=self.tokenizer.eos_token_id,
-                no_repeat_ngram_size=3
+                no_repeat_ngram_size=4,   # Slightly larger n-gram penalty
+                clean_up_tokenization_spaces=True
             )
             
             # Configure tokenizer
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.padding_side = 'left'
             
             # Get the actual device being used by the model
             device = next(self.model.parameters()).device
@@ -126,7 +118,7 @@ class FAQBot:
         
         # Configuration
         self.top_k = 5
-        self.score_threshold = 0.5
+        self.score_threshold = 0.6
         self.max_retries = 3
         self.retry_delay = 2
 
@@ -266,19 +258,20 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
             
             print("   Generating response with Phi-2...")
             
-            # Generate response using GPT-2 pipeline
+            # Generate response using the pipeline with stable parameters
             response = self.generator(
                 prompt,
-                max_new_tokens=150,  # Shorter responses for faster generation
-                temperature=0.7,     # Balanced creativity
-                top_p=0.9,           # Nucleus sampling
-                top_k=50,            # Limit to top 50 tokens
+                max_new_tokens=200,  # Match the pipeline settings
+                temperature=0.3,     # Match the pipeline settings
+                top_p=0.9,           # Match the pipeline settings
+                top_k=40,            # Match the pipeline settings
                 do_sample=True,
                 num_return_sequences=1,
-                repetition_penalty=1.2,  # Prevent repetition
-                no_repeat_ngram_size=3,  # Prevent repeating 3-grams
+                repetition_penalty=1.15,  # Match the pipeline settings
+                no_repeat_ngram_size=4,   # Match the pipeline settings
                 eos_token_id=self.tokenizer.eos_token_id,
-                pad_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.eos_token_id,
+                clean_up_tokenization_spaces=True
             )
             
             # Extract the response text
@@ -400,7 +393,6 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
     def process_query(self, query: str, language: str = None) -> Dict[str, Any]:
         """Process a user query and return a response with answer, source, and related queries."""
         start_time = time.time()
-        
         try:
             print(f"\n=== Starting query processing ===")
             print(f"Query: {query}")
@@ -410,54 +402,48 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
             # Keep only the most recent queries
             self.query_history = self.query_history[-self.max_history:]
             
-            # Language detection and translation if needed
-            print("1. Detecting language...")
+            # Language detection
+            print("\n1. Detecting language...")
             if language is None:
                 language = self.detect_language(query)
             print(f"   Detected language: {language}")
             
-            # Only translate if not English
+            # Translation if needed
             if language != "en":
-                print("2. Translating to English...")
-                try:
-                    query_en = self.translate_to_english(query, language)
-                    print(f"   Translated query: {query_en}")
-                except Exception as e:
-                    print(f"   Warning: Translation failed: {e}")
-                    query_en = query
+                print("\n2. Translating to English...")
+                query_en = self.translate_to_english(query, language)
+                print(f"   Translated query: {query_en}")
             else:
                 query_en = query
-
+                
             # Semantic search
             print("\n3. Performing semantic search...")
             results = self.semantic_search(query_en, top_k=self.top_k)
             print(f"   Found {len(results)} matches")
-
+            
             # Filter results
             print(f"\n4. Filtering results (threshold: {self.score_threshold})...")
             filtered_results = [r for r in results if self.get_score(r) >= self.score_threshold]
-
+            
             if not filtered_results and results:
                 first_score = self.get_score(results[0])
                 print(f"   No results above threshold, using top result (score: {first_score:.3f})")
                 filtered_results = [results[0]]
             else:
                 print(f"   Found {len(filtered_results)} results above threshold")
-
+            
             # Prepare context from all relevant search results
             context_parts = []
             sources = []
             scores = []
             best_match = None
-            context = None
-            source = None
-
+            
             if filtered_results:
                 print(f"   Processing {len(filtered_results)} filtered results...")
                 # Sort results by score in descending order
                 filtered_results.sort(key=self.get_score, reverse=True)
                 best_match = filtered_results[0]  # Keep track of best match for source
-
+                
                 # Use all filtered results for context
                 for i, result in enumerate(filtered_results, 1):
                     try:
@@ -469,10 +455,10 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
                             text = str(text).strip()  # Ensure text is a string and strip whitespace
                             title = str(metadata.get('title', '')).strip()
                             score = float(result.get('score', 0))
-
+                            
                             # Debug log each result
                             print(f"   - Result {i}: score={score:.3f}, has_text={bool(text)}, has_title={bool(title)}")
-
+                            
                             # Include result even if text is empty, but prefer results with text
                             context_text = f"Title: {title}\nContent: {text}" if title else text
                             if context_text.strip():
@@ -488,13 +474,13 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
                     except Exception as e:
                         print(f"   - Error processing result {i}: {str(e)}")
                         continue
-
+                
                 # Combine all context parts
                 context = '\n'.join(context_parts) if context_parts else None
-
+                
                 # Get the best source (from highest scoring result with a source)
                 source = next((s for s in sources if s), None)
-
+                
                 print(f"   Using context from {len(context_parts)} relevant results (best score: {max(scores) if scores else 0:.3f})")
                 if not context_parts:
                     print("   Warning: No valid context was extracted from the search results")
@@ -502,7 +488,7 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
                 print("   No filtered results available, will attempt to generate response without specific context")
                 context = f"User asked: {query_en}"  # Fallback context
                 source = None
-
+                
             # Fallback if no context was extracted but we have results
             if not context and filtered_results:
                 print("   No valid context extracted, using raw results as fallback")
@@ -510,7 +496,7 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
                     f"--- Result {i} ---\n{json.dumps(r, indent=2, default=str)}" 
                     for i, r in enumerate(filtered_results[:3], 1)
                 ])
-
+            
             # Generate response with search results for better context
             print("\n5. Generating response...")
             answer = self.generate_response(
@@ -520,12 +506,12 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
                 search_results=filtered_results  # Pass all filtered results for context
             )
             print(f"   Generated response: {answer[:150]}...")
-
+            
             # Get related queries using the full context from search results
             print("\n6. Getting related queries...")
             related_queries = self.get_related_queries(query_en, context, num_queries=2)
             print(f"   Found {len(related_queries)} related queries")
-
+            
             # Prepare the response with additional metadata
             response = {
                 "answer": answer,
@@ -535,10 +521,10 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
                 "search_results_count": len(filtered_results),
                 "best_match_score": self.get_score(best_match) if best_match else None
             }
-
+            
             print("\n=== Query processing complete ===\n")
             return response
-
+            
         except Exception as e:
             print(f"Error in process_query: {str(e)}")
             import traceback
@@ -549,7 +535,6 @@ Answer concisely (2-4 sentences). If multiple perspectives exist, mention them b
                 "related_queries": [],
                 "response_time": (time.time() - start_time) * 1000
             }
-            
 
 # Initialize the Flask app
 app = Flask(__name__)
