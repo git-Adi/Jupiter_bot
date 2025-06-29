@@ -8,6 +8,34 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+
+# Virtual environment
+venv/
+ENV/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Local development
+.DS_Store
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
 downloads/
 eggs/
 .eggs/
@@ -55,13 +83,14 @@ initial_knowledge.json
 final_content1.json
 final_content.json
 AI_internship_Jupiter.pdf
-crawl4ai/crawl4ai/run_sample.py
-crawl4ai/crawl4ai/run.py
-crawl4ai/crawl4ai/run1.py
-crawl4ai/crawl4ai/run2.py
-crawl4ai/crawl4ai/test.py
+crawl4ai/run_sample.py
+crawl4ai/run.py
+crawl4ai/run1.py
+crawl4ai/run2.py
+crawl4ai/test.py
 crawl4ai/test_playwright.py
 crawl4ai/summarizer.py
 
 
 
+.vercel

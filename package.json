@@ -1,0 +1,14 @@
+{
+  "name": "jupiter-faq-bot",
+  "version": "1.0.0",
+  "description": "Jupiter FAQ Bot deployment configuration",
+  "scripts": {
+    "build": "node vercel-build.js"
+  },
+  "dependencies": {
+    "@vercel/python": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=14.x"
+  }
+}
