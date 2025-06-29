@@ -106,6 +106,21 @@ class FAQBot:
     
     def generate_response(self, query: str, context: str, language: str = "en") -> str:
         """Generate a response using the LLM with fallback to simple response."""
+        print(f"\n=== Generating Response ===")
+        print(f"Query: {query}")
+        print(f"Context available: {'Yes' if context and context.strip() else 'No'}")
+        
+        # Check if Ollama is running
+        try:
+            import requests
+            response = requests.get('http://localhost:11434/api/tags', timeout=5)
+            if response.status_code != 200:
+                raise Exception(f"Ollama API returned status code {response.status_code}")
+            print("Ollama server is running and accessible")
+        except Exception as e:
+            print(f"Ollama server is not accessible: {str(e)}")
+            return "I'm currently unable to access the AI service. Please try again later or contact support if the issue persists."
+        
         try:
             # First try to get a response from the vector database
             if context and context.strip() != '':
@@ -120,33 +135,36 @@ class FAQBot:
                 Answer in a friendly, conversational tone:"""
                 
                 try:
+                    print("Attempting to call Ollama...")
                     response = ollama.chat(
                         model='llama3',
                         messages=[{'role': 'user', 'content': prompt}],
                         options={'timeout': 30}  # Add timeout
                     )
                     answer = response['message']['content']
+                    print("Successfully got response from Ollama")
                     
                     if language != "en":
+                        print(f"Translating response to {language}...")
                         answer = self.translate_from_english(answer, language)
                         
                     return answer
                 except Exception as e:
-                    print(f"Error calling Ollama: {str(e)}")
-                    # Fall through to simple response
-            
-            # Fallback response if Ollama fails or no context
-            fallback_responses = [
-                "I'm sorry, I'm having trouble accessing the information right now. Please try again later.",
-                "I couldn't find a specific answer to your question in our knowledge base.",
-                "I'm still learning about that topic. Could you try rephrasing your question?"
-            ]
-            import random
-            return random.choice(fallback_responses)
+                    error_msg = f"Error calling Ollama: {str(e)}"
+                    print(error_msg)
+                    print("Falling back to simple response")
+                    # Include the error in the response for debugging
+                    return f"I'm having trouble generating a response at the moment. (Error: {str(e)})"
+            else:
+                print("No context provided for the query")
+                return "I couldn't find enough information to answer your question. Could you provide more details or try rephrasing?"
             
         except Exception as e:
-            print(f"Error generating response: {e}")
-            return "I'm sorry, I'm having trouble generating a response right now."
+            error_msg = f"Error in generate_response: {str(e)}"
+            print(error_msg)
+            return "I'm sorry, I encountered an error while processing your request. Please try again."
+        finally:
+            print("=== End of Response Generation ===\n")
     
     def get_related_queries(self, query: str, top_n: int = 3) -> List[str]:
         if not self.query_history[self.user_id]:
@@ -170,7 +188,11 @@ class FAQBot:
     
     def process_query(self, query: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Process a user query and return the response with enhanced error handling."""
+        print("\n=== Processing Query ===")
+        print(f"Original query: {query}")
+        
         if not query or not query.strip():
+            print("Empty query received")
             return {
                 "answer": "I didn't receive your question. Could you please ask again?",
                 "source": None,
@@ -180,10 +202,15 @@ class FAQBot:
         try:
             # Detect language
             try:
+                print("Detecting language...")
                 language = self.detect_language(query)
+                print(f"Detected language: {language}")
+                
                 # If not English, translate to English for processing
                 if language != "en":
+                    print("Translating to English...")
                     query_en = self.translate_to_english(query, language)
+                    print(f"Translated query: {query_en}")
                 else:
                     query_en = query
             except Exception as e:
@@ -193,18 +220,31 @@ class FAQBot:
             
             # Get relevant context from vector DB
             try:
+                print(f"Performing semantic search for: {query_en}")
                 results = self.semantic_search(query_en, top_k=self.top_k)
+                print(f"Found {len(results)} initial results")
+                
                 # Filter results by score threshold
                 filtered_results = [r for r in results if r.score >= self.score_threshold]
+                print(f"After filtering (score >= {self.score_threshold}): {len(filtered_results)} results")
+                
+                # Log top results for debugging
+                for i, result in enumerate(results[:3], 1):
+                    print(f"  Result {i}: Score={result.score:.3f}, ID={result.id}")
+                    if hasattr(result, 'metadata') and 'text' in result.metadata:
+                        print(f"     Text: {result.metadata['text'][:100]}...")
+                
             except Exception as e:
                 print(f"Vector search error: {e}")
                 filtered_results = []
             
             # If no good matches, try a more general search
             if not filtered_results:
+                print("No good matches found, trying fallback search...")
                 try:
                     results = self.semantic_search(query_en, top_k=5)  # Try with more results
                     filtered_results = [r for r in results if r.score >= (self.score_threshold * 0.8)]  # Lower threshold
+                    print(f"Fallback search found {len(filtered_results)} results")
                 except Exception as e:
                     print(f"Fallback search error: {e}")
             
@@ -216,36 +256,51 @@ class FAQBot:
                 best_match = filtered_results[0]
                 context = best_match.metadata.get('text', '')
                 source = best_match.metadata.get('source', None)
+                print(f"Using context from: {source}")
+                print(f"Context length: {len(context)} characters")
+            else:
+                print("No relevant context found in the knowledge base")
             
             # Generate response using LLM with the available context
+            print("Generating response...")
             answer = self.generate_response(query_en, context, language)
             
             # If we don't have a good answer, provide a helpful message
             if not answer or "I couldn't find" in answer or "I'm sorry" in answer:
                 answer = "I couldn't find a specific answer to your question in our knowledge base. " \
                         "Could you try rephrasing your question or ask about something else?"
+                print("Using fallback response")
             
             # Get related queries if we have some context
             related_queries = []
             if context:
                 try:
                     related_queries = self.get_related_queries(query_en)[:3]  # Limit to 3 related queries
+                    print(f"Found {len(related_queries)} related queries")
                 except Exception as e:
                     print(f"Error getting related queries: {e}")
             
-            return {
+            response = {
                 "answer": answer,
                 "source": source,
                 "related_queries": related_queries
             }
             
+            print("Query processing complete")
+            return response
+            
         except Exception as e:
-            print(f"Unexpected error in process_query: {e}")
+            error_msg = f"Unexpected error in process_query: {e}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
             return {
                 "answer": "I'm experiencing some technical difficulties. Please try again in a moment.",
                 "source": None,
                 "related_queries": ["Try rephrasing your question", "Check back later"]
             }
+        finally:
+            print("=== End of Query Processing ===\n")
 
 
 # Initialize Flask app

@@ -3,7 +3,10 @@
   "builds": [
     {
       "src": "api/index.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "runtime": "python3.9"
+      }
     },
     {
       "src": "static/**",
@@ -19,5 +22,13 @@
       "src": "/(.*)",
       "dest": "/static/index.html"
     }
-  ]
+  ],
+  "build": {
+    "env": {
+      "PYTHON_VERSION": "3.9",
+      "PYTHON_SETUP_REQUIRES": "pip>=20.1.1",
+      "PYTHON_GET_PIP_SHA256": "421ac1d44c0cf9730a088e3371d567792e68f91283816140d1cdef53a8a1c9be",
+      "PYTHON_GET_PIP_URL": "https://github.com/pypa/get-pip/raw/5eaac1050023df1f5c98b173b248c260023f2278/public/get-pip.py"
+    }
+  }
 }
