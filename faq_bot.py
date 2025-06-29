@@ -33,6 +33,20 @@ class FAQBot:
         self.top_k = 3
         self.score_threshold = 0.7
         
+        # Check if Ollama is available
+        self.ollama_available = self._check_ollama_available()
+        if not self.ollama_available:
+            print("WARNING: Ollama server is not available. Using fallback responses only.")
+    
+    def _check_ollama_available(self):
+        """Check if Ollama server is available."""
+        try:
+            response = requests.get('http://localhost:11434/api/tags', timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Ollama server is not available: {str(e)}")
+            return False
+        
     def detect_language(self, text: str) -> str: # function to detect language
         try:
             return detect(text)
@@ -110,19 +124,17 @@ class FAQBot:
         print(f"Query: {query}")
         print(f"Context available: {'Yes' if context and context.strip() else 'No'}")
         
-        # Check if Ollama is running
-        try:
-            import requests
-            response = requests.get('http://localhost:11434/api/tags', timeout=5)
-            if response.status_code != 200:
-                raise Exception(f"Ollama API returned status code {response.status_code}")
-            print("Ollama server is running and accessible")
-        except Exception as e:
-            print(f"Ollama server is not accessible: {str(e)}")
-            return "I'm currently unable to access the AI service. Please try again later or contact support if the issue persists."
+        # If Ollama is not available, use a fallback response
+        if not self.ollama_available:
+            if context and context.strip():
+                # Try to extract a relevant snippet from the context
+                snippet = context[:200] + '...' if len(context) > 200 else context
+                return f"I found some information that might help: {snippet}\n\n(Note: Advanced AI features are currently unavailable. This is a direct excerpt from our knowledge base.)"
+            else:
+                return "I'm currently unable to access the AI service, but I can still help with basic information. Could you try rephrasing your question or contact our support team for assistance?"
         
         try:
-            # First try to get a response from the vector database
+            # If we have context, try to use Ollama for a better response
             if context and context.strip() != '':
                 prompt = f"""
                 You are a helpful customer support assistant for a bank.
@@ -139,7 +151,7 @@ class FAQBot:
                     response = ollama.chat(
                         model='llama3',
                         messages=[{'role': 'user', 'content': prompt}],
-                        options={'timeout': 30}  # Add timeout
+                        options={'timeout': 30}
                     )
                     answer = response['message']['content']
                     print("Successfully got response from Ollama")
@@ -152,17 +164,20 @@ class FAQBot:
                 except Exception as e:
                     error_msg = f"Error calling Ollama: {str(e)}"
                     print(error_msg)
-                    print("Falling back to simple response")
-                    # Include the error in the response for debugging
-                    return f"I'm having trouble generating a response at the moment. (Error: {str(e)})"
-            else:
-                print("No context provided for the query")
-                return "I couldn't find enough information to answer your question. Could you provide more details or try rephrasing?"
+                    # Fall through to context-based response
+            
+            # If we have context but Ollama failed, return a simple response with the context
+            if context and context.strip():
+                snippet = context[:200] + '...' if len(context) > 200 else context
+                return f"Here's what I found: {snippet}\n\n(Note: I'm currently unable to provide a detailed response. For more information, please contact our support team.)"
+            
+            # If no context is available
+            return "I couldn't find specific information to answer your question. Could you try rephrasing or providing more details?"
             
         except Exception as e:
             error_msg = f"Error in generate_response: {str(e)}"
             print(error_msg)
-            return "I'm sorry, I encountered an error while processing your request. Please try again."
+            return "I'm sorry, I encountered an error while processing your request. Please try again or contact support if the issue persists."
         finally:
             print("=== End of Response Generation ===\n")
     
@@ -194,74 +209,65 @@ class FAQBot:
         if not query or not query.strip():
             print("Empty query received")
             return {
-                "answer": "I didn't receive your question. Could you please ask again?",
+                "answer": "Please provide a valid question.",
                 "source": None,
                 "related_queries": []
             }
-        
+            
         try:
-            # Detect language
-            try:
-                print("Detecting language...")
-                language = self.detect_language(query)
-                print(f"Detected language: {language}")
-                
-                # If not English, translate to English for processing
-                if language != "en":
-                    print("Translating to English...")
-                    query_en = self.translate_to_english(query, language)
-                    print(f"Translated query: {query_en}")
-                else:
-                    query_en = query
-            except Exception as e:
-                print(f"Language detection/translation error: {e}")
-                query_en = query  # Fallback to original query
-                language = "en"
+            # Detect language and translate to English if needed
+            print("Detecting language...")
+            language = self.detect_language(query)
+            print(f"Detected language: {language}")
             
-            # Get relevant context from vector DB
-            try:
-                print(f"Performing semantic search for: {query_en}")
-                results = self.semantic_search(query_en, top_k=self.top_k)
-                print(f"Found {len(results)} initial results")
+            if language != "en":
+                print("Translating to English...")
+                query_en = self.translate_to_english(query, language)
+                print(f"Translated query: {query_en}")
+            else:
+                query_en = query
                 
-                # Filter results by score threshold
-                filtered_results = [r for r in results if r.score >= self.score_threshold]
-                print(f"After filtering (score >= {self.score_threshold}): {len(filtered_results)} results")
-                
-                # Log top results for debugging
-                for i, result in enumerate(results[:3], 1):
-                    print(f"  Result {i}: Score={result.score:.3f}, ID={result.id}")
-                    if hasattr(result, 'metadata') and 'text' in result.metadata:
-                        print(f"     Text: {result.metadata['text'][:100]}...")
-                
-            except Exception as e:
-                print(f"Vector search error: {e}")
-                filtered_results = []
+            # Perform semantic search
+            print(f"Performing semantic search for: {query_en}")
+            results = self.semantic_search(query_en, top_k=self.top_k)
+            print(f"Found {len(results)} initial results")
             
-            # If no good matches, try a more general search
+            # Filter results by score threshold
+            filtered_results = [r for r in results if r.score >= self.score_threshold]
+            print(f"After filtering (score >= {self.score_threshold}): {len(filtered_results)} results")
+            
+            # Always show some results even if below threshold when Ollama is not available
+            if not filtered_results and not self.ollama_available and results:
+                print("No high-confidence matches, but showing best available results (Ollama unavailable)")
+                filtered_results = [results[0]]  # Take the best match regardless of score
+            
+            # If still no good matches, try a more lenient search
             if not filtered_results:
                 print("No good matches found, trying fallback search...")
-                try:
-                    results = self.semantic_search(query_en, top_k=5)  # Try with more results
-                    filtered_results = [r for r in results if r.score >= (self.score_threshold * 0.8)]  # Lower threshold
-                    print(f"Fallback search found {len(filtered_results)} results")
-                except Exception as e:
-                    print(f"Fallback search error: {e}")
+                results = self.semantic_search(query_en, top_k=5)  # Get more results
+                filtered_results = [r for r in results if r.score >= (self.score_threshold * 0.8)]
+                print(f"Fallback search found {len(filtered_results)} results")
             
+            # Prepare context and source
             context = ""
             source = None
             
             if filtered_results:
-                # Get the most relevant result
+                # Sort by score in descending order
+                filtered_results.sort(key=lambda x: x.score, reverse=True)
+                
+                # Log top results
+                for i, result in enumerate(filtered_results[:3], 1):
+                    print(f"  Result {i}: Score={result.score:.3f}, ID={result.id}")
+                
                 best_match = filtered_results[0]
                 context = best_match.metadata.get('text', '')
                 source = best_match.metadata.get('source', None)
-                print(f"Using context from: {source}")
-                print(f"Context length: {len(context)} characters")
+                print(f"Best match score: {best_match.score:.3f}, Source: {source}")
             else:
                 print("No relevant context found in the knowledge base")
             
-            # Generate response using LLM with the available context
+            # Generate response
             print("Generating response...")
             answer = self.generate_response(query_en, context, language)
             
