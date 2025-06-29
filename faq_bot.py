@@ -51,27 +51,9 @@ class FAQBot:
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.embedding_dim = 384  # Dimension for all-MiniLM-L6-v2
         
-        # Initialize the language model
-        if torch.backends.mps.is_available():
-            self.device = "mps"  # Use MPS for Apple Silicon
-        elif torch.cuda.is_available():
-            self.device = "cuda"
-        else:
-            self.device = "cpu"
-            
-        self.model_name = "meta-llama/Llama-3.2-3B-Instruct"
-        
-        print(f"Using device: {self.device}")
-        
-        # Login to Hugging Face Hub
-        from huggingface_hub import login
-        hf_token = os.getenv('HUGGING_FACE_HUB_TOKEN')
-        if not hf_token:
-            raise ValueError(
-                "HUGGING_FACE_HUB_TOKEN environment variable not found. "
-                "Please set it with your Hugging Face access token."
-            )
-        login(token=hf_token)
+        # Model configuration
+        self.model_name = "microsoft/phi-2"
+        print(f"Loading model: {self.model_name}")
         
         # Load tokenizer and model with error handling
         try:
@@ -81,34 +63,34 @@ class FAQBot:
                 trust_remote_code=True
             )
             
-            print("Loading model with 4-bit quantization (this may take a while)...")
+            print("Loading model (this may take a moment, model is ~2.3GB)...")
             
-            # Configure 4-bit quantization
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-            
-            # Load model with 4-bit quantization
+            # Load model with bfloat16 precision for better stability
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 trust_remote_code=True,
-                quantization_config=bnb_config,
-                device_map="auto"  # Let accelerate handle device placement
+                device_map="auto",
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                low_cpu_mem_usage=True,
+                attn_implementation="sdpa"  # Use SDPA attention for better performance
             )
             
-            # No need to manually move to device when using device_map="auto"
-            
-            # Set up the generation pipeline for quantized model
+            # Set up the generation pipeline with more conservative parameters
             self.generator = pipeline(
                 "text-generation",
                 model=self.model,
                 tokenizer=self.tokenizer,
                 device_map="auto",
-                model_kwargs={"load_in_4bit": True},
-                torch_dtype=torch.float16
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                max_new_tokens=200,  # More conservative token limit
+                do_sample=True,
+                temperature=0.3,     # Lower temperature for more focused outputs
+                top_p=0.9,           # Use nucleus sampling
+                top_k=40,            # Limit to top 40 tokens
+                repetition_penalty=1.15,  # Slightly higher to prevent repetition
+                pad_token_id=self.tokenizer.eos_token_id,
+                no_repeat_ngram_size=4,   # Slightly larger n-gram penalty
+                clean_up_tokenization_spaces=True
             )
             
             # Configure tokenizer
@@ -116,7 +98,9 @@ class FAQBot:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.padding_side = 'left'
             
-            print(f"Successfully loaded {self.model_name} on {self.device}")
+            # Get the actual device being used by the model
+            device = next(self.model.parameters()).device
+            print(f"Successfully loaded {self.model_name} on {device}")
             
         except Exception as e:
             print(f"Error loading model: {e}")
@@ -259,27 +243,35 @@ Question: {query}
 Answer concisely (2-4 sentences). If multiple perspectives exist, mention them briefly."""}
             ]
             
-            # Apply chat template
-            prompt = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+            # Format prompt for Phi-2
+            prompt = f"""### Instruction:
+            Answer the following question based on the provided context.
             
-            print("   Generating response with Llama 3...")
+            ### Context:
+            {context}
             
-            # Generate response using the pipeline
+            ### Question:
+            {query}
+            
+            ### Response:
+            """
+            
+            print("   Generating response with Phi-2...")
+            
+            # Generate response using the pipeline with stable parameters
             response = self.generator(
                 prompt,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.9,
-                top_k=50,
+                max_new_tokens=200,  # Match the pipeline settings
+                temperature=0.3,     # Match the pipeline settings
+                top_p=0.9,           # Match the pipeline settings
+                top_k=40,            # Match the pipeline settings
                 do_sample=True,
                 num_return_sequences=1,
+                repetition_penalty=1.15,  # Match the pipeline settings
+                no_repeat_ngram_size=4,   # Match the pipeline settings
                 eos_token_id=self.tokenizer.eos_token_id,
                 pad_token_id=self.tokenizer.eos_token_id,
-                repetition_penalty=1.1
+                clean_up_tokenization_spaces=True
             )
             
             # Extract the response text
