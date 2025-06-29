@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import requests
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 from typing import List, Dict, Any, Optional
@@ -19,7 +20,7 @@ load_dotenv()
 
 class FAQBot:
     def __init__(self):
-        # Initializing all the models and vector DB index
+        # Initialize the model and Pinecone index
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
         self.index_name = os.getenv('PINECONE_INDEX_NAME', 'jupiter')
@@ -32,26 +33,83 @@ class FAQBot:
         # Threshold for evaluation of results
         self.top_k = 3
         self.score_threshold = 0.7
-        
-        # Check if Ollama is available
-        self.ollama_available = self._check_ollama_available()
-        if not self.ollama_available:
-            print("WARNING: Ollama server is not available. Using fallback responses only.")
     
     def _check_ollama_available(self):
         """Check if Ollama server is available."""
+        import socket
+        import requests
+        
+        host = '127.0.0.1'
+        port = 11434
+        url = f"http://{host}:{port}/api/tags"
+        
+        print(f"\n=== Ollama Connection Test ===")
+        print(f"Testing connection to {url}")
+        
+        # Test 1: Basic socket connection
         try:
-            response = requests.get('http://localhost:11434/api/tags', timeout=5)
-            return response.status_code == 200
+            print("1. Testing socket connection...")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(5)
+                s.connect((host, port))
+            print("   ✓ Socket connection successful")
         except Exception as e:
-            print(f"Ollama server is not available: {str(e)}")
+            print(f"   ✗ Socket connection failed: {e}")
+            print("   Make sure Ollama is running with: ollama serve")
             return False
         
-    def detect_language(self, text: str) -> str: # function to detect language
+        # Test 2: HTTP request
+        try:
+            print("2. Testing HTTP request...")
+            response = requests.get(url, timeout=10)
+            print(f"   ✓ HTTP request successful (Status: {response.status_code})")
+            if response.status_code != 200:
+                print(f"   ✗ Unexpected status code: {response.text}")
+                return False
+        except Exception as e:
+            print(f"   ✗ HTTP request failed: {e}")
+            return False
+        
+        # Test 3: Ollama Python client
+        try:
+            print("3. Testing Ollama Python client...")
+            # Create a new client instance
+            client = ollama.Client(host=f"http://{host}:{port}")
+            
+            # Test with a simple model list
+            try:
+                models = client.list()
+                if hasattr(models, 'models'):
+                    model_list = [m.get('name', 'unnamed') for m in models.models]
+                else:
+                    model_list = ['No models found']
+                print(f"   ✓ Ollama client connected successfully")
+                print(f"   Available models: {model_list}")
+                return True
+            except Exception as list_error:
+                print(f"   ! Warning: Could not list models: {list_error}")
+                print("   Testing with a simple generate request...")
+                # Try a simple generate request as fallback
+                try:
+                    test_response = client.generate(model='llama3', prompt='test')
+                    print("   ✓ Ollama client generate test successful")
+                    return True
+                except Exception as gen_error:
+                    print(f"   ✗ Ollama generate test failed: {gen_error}")
+                    return False
+                    
+        except Exception as e:
+            print(f"   ✗ Ollama client test failed: {e}")
+            print(f"   Error type: {type(e).__name__}")
+            return False
+        finally:
+            print("=============================\n")
+            
+    def detect_language(self, text: str) -> str:
         try:
             return detect(text)
         except:
-            return "en" 
+            return "en"
             
     def translate_to_english(self, text: str, src_lang: str) -> str:
         if src_lang == "en" or not text.strip():
@@ -71,11 +129,9 @@ class FAQBot:
             }
             from_lang = lang_map.get(src_lang, src_lang)
             
-            
             if len(text) > 500:  
                 text = text[:500]
                 
-            # For demo purposes, return a simple translation
             if from_lang in ['hindi', 'hi']:
                 return "My card has been blocked, what should I do?"
             return text  
@@ -83,17 +139,16 @@ class FAQBot:
         except Exception as e:
             print(f"Translation error (to English): {e}")
             return text
-
+            
     def translate_from_english(self, text: str, target_lang: str) -> str:
         if target_lang == "en" or not text.strip():
             return text
             
         try:
-            
             if len(text) > 500:  
                 text = text[:500]
                 
-            # For demo purposes
+            # For demo purposes, return a simple translation
             if target_lang in ['hindi', 'hi']:
                 return "hanji"
             return text  
@@ -102,11 +157,11 @@ class FAQBot:
             print(f"Translation error (from English): {e}")
             return text
     
-    def get_embedding(self, text: str) -> List[float]: # embedding generation
+    def get_embedding(self, text: str) -> List[float]: 
         return self.embedding_model.encode(text).tolist()
         
     def semantic_search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        # query embedding
+        # Getting query embedding
         query_embedding = self.get_embedding(query)
         
         # Searching in Pinecone
@@ -119,67 +174,31 @@ class FAQBot:
         return results.matches if hasattr(results, 'matches') else []
     
     def generate_response(self, query: str, context: str, language: str = "en") -> str:
-        """Generate a response using the LLM with fallback to simple response."""
-        print(f"\n=== Generating Response ===")
-        print(f"Query: {query}")
-        print(f"Context available: {'Yes' if context and context.strip() else 'No'}")
+        # Prompting
+        prompt = f"""You are a helpful assistant for Jupiter's FAQ system. 
+        Use the following context to answer the question. If you don't know the answer, say so.
         
-        # If Ollama is not available, use a fallback response
-        if not self.ollama_available:
-            if context and context.strip():
-                # Try to extract a relevant snippet from the context
-                snippet = context[:200] + '...' if len(context) > 200 else context
-                return f"I found some information that might help: {snippet}\n\n(Note: Advanced AI features are currently unavailable. This is a direct excerpt from our knowledge base.)"
-            else:
-                return "I'm currently unable to access the AI service, but I can still help with basic information. Could you try rephrasing your question or contact our support team for assistance?"
+        Context: {context}
+        
+        Question: {query}
+        
+        Answer in a friendly, conversational tone:"""
         
         try:
-            # If we have context, try to use Ollama for a better response
-            if context and context.strip() != '':
-                prompt = f"""
-                You are a helpful customer support assistant for a bank.
-                Use the following context to answer the question. If you don't know the answer, say so.
-                
-                Context: {context}
-                
-                Question: {query}
-                
-                Answer in a friendly, conversational tone:"""
-                
-                try:
-                    print("Attempting to call Ollama...")
-                    response = ollama.chat(
-                        model='llama3',
-                        messages=[{'role': 'user', 'content': prompt}],
-                        options={'timeout': 30}
-                    )
-                    answer = response['message']['content']
-                    print("Successfully got response from Ollama")
-                    
-                    if language != "en":
-                        print(f"Translating response to {language}...")
-                        answer = self.translate_from_english(answer, language)
-                        
-                    return answer
-                except Exception as e:
-                    error_msg = f"Error calling Ollama: {str(e)}"
-                    print(error_msg)
-                    # Fall through to context-based response
+            response = ollama.chat(
+                model='llama3',
+                messages=[{'role': 'user', 'content': prompt}]
+            )
+            answer = response['message']['content']
             
-            # If we have context but Ollama failed, return a simple response with the context
-            if context and context.strip():
-                snippet = context[:200] + '...' if len(context) > 200 else context
-                return f"Here's what I found: {snippet}\n\n(Note: I'm currently unable to provide a detailed response. For more information, please contact our support team.)"
-            
-            # If no context is available
-            return "I couldn't find specific information to answer your question. Could you try rephrasing or providing more details?"
-            
+            # Translate back to original language if needed
+            if language != "en":
+                answer = self.translate_from_english(answer, language)
+                
+            return answer
         except Exception as e:
-            error_msg = f"Error in generate_response: {str(e)}"
-            print(error_msg)
-            return "I'm sorry, I encountered an error while processing your request. Please try again or contact support if the issue persists."
-        finally:
-            print("=== End of Response Generation ===\n")
+            print(f"Error generating response: {e}")
+            return "I'm sorry, I'm having trouble generating a response right now."
     
     def get_related_queries(self, query: str, top_n: int = 3) -> List[str]:
         if not self.query_history[self.user_id]:
@@ -202,114 +221,86 @@ class FAQBot:
         return [q for q, _ in similarities[:top_n] if q.lower() != query.lower()]
     
     def process_query(self, query: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-        """Process a user query and return the response with enhanced error handling."""
-        print("\n=== Processing Query ===")
-        print(f"Original query: {query}")
+        if user_id:
+            self.user_id = user_id
+            
+        self.query_history[self.user_id].append(query[:1000])  
         
-        if not query or not query.strip():
-            print("Empty query received")
-            return {
-                "answer": "Please provide a valid question.",
-                "source": None,
-                "related_queries": []
-            }
-            
         try:
-            # Detect language and translate to English if needed
-            print("Detecting language...")
-            language = self.detect_language(query)
-            print(f"Detected language: {language}")
-            
-            if language != "en":
-                print("Translating to English...")
-                query_en = self.translate_to_english(query, language)
-                print(f"Translated query: {query_en}")
+            detected_lang = self.detect_language(query)
+            if detected_lang != "en":
+                translated_query = self.translate_to_english(query, detected_lang)
             else:
-                query_en = query
-                
-            # Perform semantic search
-            print(f"Performing semantic search for: {query_en}")
-            results = self.semantic_search(query_en, top_k=self.top_k)
-            print(f"Found {len(results)} initial results")
-            
-            # Filter results by score threshold
-            filtered_results = [r for r in results if r.score >= self.score_threshold]
-            print(f"After filtering (score >= {self.score_threshold}): {len(filtered_results)} results")
-            
-            # Always show some results even if below threshold when Ollama is not available
-            if not filtered_results and not self.ollama_available and results:
-                print("No high-confidence matches, but showing best available results (Ollama unavailable)")
-                filtered_results = [results[0]]  # Take the best match regardless of score
-            
-            # If still no good matches, try a more lenient search
-            if not filtered_results:
-                print("No good matches found, trying fallback search...")
-                results = self.semantic_search(query_en, top_k=5)  # Get more results
-                filtered_results = [r for r in results if r.score >= (self.score_threshold * 0.8)]
-                print(f"Fallback search found {len(filtered_results)} results")
-            
-            # Prepare context and source
-            context = ""
-            source = None
-            
-            if filtered_results:
-                # Sort by score in descending order
-                filtered_results.sort(key=lambda x: x.score, reverse=True)
-                
-                # Log top results
-                for i, result in enumerate(filtered_results[:3], 1):
-                    print(f"  Result {i}: Score={result.score:.3f}, ID={result.id}")
-                
-                best_match = filtered_results[0]
-                context = best_match.metadata.get('text', '')
-                source = best_match.metadata.get('source', None)
-                print(f"Best match score: {best_match.score:.3f}, Source: {source}")
-            else:
-                print("No relevant context found in the knowledge base")
-            
-            # Generate response
-            print("Generating response...")
-            answer = self.generate_response(query_en, context, language)
-            
-            # If we don't have a good answer, provide a helpful message
-            if not answer or "I couldn't find" in answer or "I'm sorry" in answer:
-                answer = "I couldn't find a specific answer to your question in our knowledge base. " \
-                        "Could you try rephrasing your question or ask about something else?"
-                print("Using fallback response")
-            
-            # Get related queries if we have some context
-            related_queries = []
-            if context:
-                try:
-                    related_queries = self.get_related_queries(query_en)[:3]  # Limit to 3 related queries
-                    print(f"Found {len(related_queries)} related queries")
-                except Exception as e:
-                    print(f"Error getting related queries: {e}")
-            
-            response = {
-                "answer": answer,
-                "source": source,
-                "related_queries": related_queries
-            }
-            
-            print("Query processing complete")
-            return response
-            
+                translated_query = query
         except Exception as e:
-            error_msg = f"Unexpected error in process_query: {e}"
-            print(error_msg)
-            import traceback
-            traceback.print_exc()
-            return {
-                "answer": "I'm experiencing some technical difficulties. Please try again in a moment.",
-                "source": None,
-                "related_queries": ["Try rephrasing your question", "Check back later"]
-            }
-        finally:
-            print("=== End of Query Processing ===\n")
-
-
-# Initialize Flask app
+            print(f"Language detection/translation error: {e}")
+            detected_lang = "en"
+            translated_query = query
+            
+        # Getting semantic search results
+        search_results = self.semantic_search(translated_query, self.top_k)
+        
+        # Filtering results using score threshold
+        relevant_results = [
+            r for r in search_results 
+            if hasattr(r, 'score') and r.score >= self.score_threshold
+        ]
+        
+        # Getting related queries regardless of results
+        related_queries = self.get_related_queries(translated_query[:500]) 
+        
+        if not relevant_results:
+            # If no relevant results, using LLM to generate a general response
+            try:
+                # Prompting
+                prompt = f"""Answer the following banking question concisely in 2-3 sentences. If you don't know the answer, say so.
+                
+                Question: {query[:400]}
+                
+                Answer:"""
+                
+                response = ollama.chat(
+                    model='llama3',
+                    messages=[{'role': 'user', 'content': prompt}],
+                    options={'max_tokens': 500}  
+                )
+                answer = response['message']['content'].strip()
+                
+                if len(answer) > 2000:
+                    answer = answer[:2000] + "..."
+                
+                # Translate back to original language 
+                if detected_lang != "en" and answer:
+                    answer = self.translate_from_english(answer, detected_lang)
+                    
+                return {
+                    "answer": answer,
+                    "source": None,
+                    "related_queries": related_queries[:3] 
+                }
+            except Exception as e:
+                print(f"Error generating response: {e}")
+                return {
+                    "answer": "I couldn't find a relevant answer to your question.",
+                    "source": None,
+                    "related_queries": related_queries[:3]
+                }
+        
+        # Preparing context from top results
+        context = "\n\n".join([
+            f"Source: {r.metadata.get('title', 'Unknown')}\nContent: {r.metadata.get('content', '')}"
+            for r in relevant_results
+        ])
+        
+        # Generating response using LLM with RAG context
+        answer = self.generate_response(translated_query, context, detected_lang)
+        
+        return {
+            "answer": answer,
+            "source": relevant_results[0].metadata.get('url', ''),
+            "related_queries": related_queries
+        }
+        
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.config['JSON_SORT_KEYS'] = False  # Keep the order of dictionary keys
 
