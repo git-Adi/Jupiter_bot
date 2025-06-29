@@ -81,29 +81,34 @@ class FAQBot:
                 trust_remote_code=True
             )
             
-            print("Loading model (this may take a while, model is ~6GB)...")
+            print("Loading model with 4-bit quantization (this may take a while)...")
             
-            # Use float16 for CUDA/MPS, float32 for CPU
-            torch_dtype = torch.float16 if self.device in ["cuda", "mps"] else torch.float32
+            # Configure 4-bit quantization
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
             
+            # Load model with 4-bit quantization
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 trust_remote_code=True,
-                torch_dtype=torch_dtype,
-                device_map=None,  # Disable device_map to avoid accelerate
-                low_cpu_mem_usage=True
+                quantization_config=bnb_config,
+                device_map="auto"  # Let accelerate handle device placement
             )
             
-            # Move model to device
-            self.model = self.model.to(self.device)
+            # No need to manually move to device when using device_map="auto"
             
-            # Set up the generation pipeline
+            # Set up the generation pipeline for quantized model
             self.generator = pipeline(
                 "text-generation",
                 model=self.model,
                 tokenizer=self.tokenizer,
-                device=self.device,
-                torch_dtype=torch_dtype
+                device_map="auto",
+                model_kwargs={"load_in_4bit": True},
+                torch_dtype=torch.float16
             )
             
             # Configure tokenizer
