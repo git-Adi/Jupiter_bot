@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import requests
@@ -7,18 +8,23 @@ from flask import Flask, render_template, request, jsonify
 from typing import List, Dict, Any, Optional
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 from dotenv import load_dotenv
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline
 import torch
-from langdetect import detect
+import traceback
 from translate import Translator as TranslateTranslator
+from langdetect import detect
 from collections import defaultdict
 
 load_dotenv()
 
 class FAQBot:
     def __init__(self):
+        # Initialize query history
+        self.query_history = []
+        self.max_history = 10  # Keep last 10 queries in history
+        
         # Initialize Pinecone with error handling
         try:
             pinecone_api_key = os.getenv('PINECONE_API_KEY')
@@ -46,65 +52,76 @@ class FAQBot:
         self.embedding_dim = 384  # Dimension for all-MiniLM-L6-v2
         
         # Initialize the language model
-        self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-        self.model_name = "microsoft/phi-2"
+        if torch.backends.mps.is_available():
+            self.device = "mps"  # Use MPS for Apple Silicon
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
+            
+        self.model_name = "meta-llama/Llama-3.2-3B-Instruct"
         
         print(f"Using device: {self.device}")
         
-        # Configure quantization if CUDA is available
-        bnb_config = None
-        if self.device == "cuda":
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
+        # Login to Hugging Face Hub
+        from huggingface_hub import login
+        hf_token = os.getenv('HUGGING_FACE_HUB_TOKEN')
+        if not hf_token:
+            raise ValueError(
+                "HUGGING_FACE_HUB_TOKEN environment variable not found. "
+                "Please set it with your Hugging Face access token."
             )
+        login(token=hf_token)
         
         # Load tokenizer and model with error handling
         try:
+            print("Loading tokenizer...")
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name,
                 trust_remote_code=True
             )
             
-            # Set model to float16 for CUDA, float32 for MPS/CPU
-            torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+            print("Loading model (this may take a while, model is ~6GB)...")
             
-            # For MPS, we need to use a specific approach
-            if self.device == "mps":
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.model_name,
-                    trust_remote_code=True,
-                    torch_dtype=torch_dtype
-                )
-                self.model = self.model.to(self.device)
-            else:
-                # For CUDA/CPU, use the standard approach
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.model_name,
-                    trust_remote_code=True,
-                    device_map="auto" if self.device == "cuda" else None,
-                    quantization_config=bnb_config if self.device == "cuda" else None,
-                    torch_dtype=torch_dtype
-                )
-                if self.device == "cpu":
-                    self.model = self.model.to(self.device)
+            # Use float16 for CUDA/MPS, float32 for CPU
+            torch_dtype = torch.float16 if self.device in ["cuda", "mps"] else torch.float32
             
-            # Ensure tokenizer has a padding token
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                torch_dtype=torch_dtype,
+                device_map=None,  # Disable device_map to avoid accelerate
+                low_cpu_mem_usage=True
+            )
+            
+            # Move model to device
+            self.model = self.model.to(self.device)
+            
+            # Set up the generation pipeline
+            self.generator = pipeline(
+                "text-generation",
+                model=self.model,
+                tokenizer=self.tokenizer,
+                device=self.device,
+                torch_dtype=torch_dtype
+            )
+            
+            # Configure tokenizer
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-                
+            self.tokenizer.padding_side = 'left'
+            
             print(f"Successfully loaded {self.model_name} on {self.device}")
             
         except Exception as e:
             print(f"Error loading model: {e}")
-            print("Falling back to CPU with no quantization...")
-            self.device = "cpu"
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-                device_map="auto"
+            print(traceback.format_exc())
+            raise RuntimeError(
+                "Failed to load the model. Please ensure:\n"
+                "1. You have accepted the model's terms of use at https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct\n"
+                "2. Your HUGGING_FACE_HUB_TOKEN is correctly set in your .env file\n"
+                "3. You have a stable internet connection\n"
+                "4. You have enough disk space (model is ~6GB)"
             )
         
         # Initialize translator
@@ -162,305 +179,364 @@ class FAQBot:
 
     def translate_to_english(self, text: str, src_lang: str) -> str:
         """Translate text to English if it's not already in English."""
-        if src_lang == "en" or not text.strip():
+        if not text.strip() or src_lang == 'en':
             return text
             
-        # Mapping language codes to translator format
-        lang_map = {
-            'hi': 'hi',  # Hindi
-            'mr': 'mr',  # Marathi
-            'bn': 'bn',  # Bengali
-            'te': 'te',  # Telugu
-            'ta': 'ta',  # Tamil
-            'gu': 'gu',  # Gujarati
-            'kn': 'kn',  # Kannada
-            'ml': 'ml',  # Malayalam
-            'pa': 'pa'   # Punjabi
-        }
-        
         try:
-            translator = TranslateTranslator(from_lang=lang_map.get(src_lang, 'auto'), to_lang='en')
+            print(f"   Translating from {src_lang} to en...")
+            translator = TranslateTranslator(from_lang=src_lang, to_lang="en")
             return translator.translate(text)
+            
         except Exception as e:
-            print(f"Translation error: {e}")
+            print(f"Translation error ({src_lang}->en): {str(e)}")
             return text
-
+            
     def translate_from_english(self, text: str, target_lang: str) -> str:
         """Translate text from English to target language."""
-        if target_lang == "en" or not text.strip():
+        if not text.strip() or target_lang == 'en':
             return text
             
-        lang_map = {
-            'hi': 'hi',  # Hindi
-            'mr': 'mr',  # Marathi
-            'bn': 'bn',  # Bengali
-            'te': 'te',  # Telugu
-            'ta': 'ta',  # Tamil
-            'gu': 'gu',  # Gujarati
-            'kn': 'kn',  # Kannada
-            'ml': 'ml',  # Malayalam
-            'pa': 'pa'   # Punjabi
-        }
-        
         try:
-            translator = TranslateTranslator(from_lang='en', to_lang=lang_map.get(target_lang, 'en'))
+            print(f"   Translating from en to {target_lang}...")
+            translator = TranslateTranslator(from_lang="en", to_lang=target_lang)
             return translator.translate(text)
+            
         except Exception as e:
-            print(f"Translation error: {e}")
+            print(f"Translation error (en->{target_lang}): {str(e)}")
             return text
 
-    def generate_response(self, query: str, context: str, language: str = "en") -> str:
+    def generate_response(self, query: str, context: str, language: str = "en", search_results: List[Dict] = None) -> str:
         try:
-            print("   Formatting prompt...")
-            # Format the prompt for the Phi-2 model with instructions for detailed response
-            prompt = f"""Context: {context}
+            print("   Formatting prompt with semantic search results as context...")
+            
+            # Process search results to create a structured context
+            context_parts = []
+            
+            if search_results:
+                # Add relevant information from top search results with their scores
+                for i, result in enumerate(search_results[:3], 1):  # Use top 3 most relevant results
+                    if isinstance(result, dict):
+                        metadata = result.get('metadata', {})
+                        text = metadata.get('text', '').strip()
+                        title = metadata.get('title', '')
+                        score = result.get('score', 0)
+                        
+                        # Only include results with sufficient relevance
+                        if text and score > self.score_threshold:
+                            # Clean and format the text
+                            text = ' '.join(text.split())  # Normalize whitespace
+                            context_parts.append(
+                                f"--- RESULT {i} (Relevance: {score:.2f}) ---\n"
+                                f"Title: {title}\n"
+                                f"Content: {text}\n"
+                            )
+            
+            # Add the original context if it's not already included
+            if context and context.strip() not in '\n'.join(context_parts):
+                context_parts.insert(0, f"--- QUERY CONTEXT ---\n{context}\n")
+            
+            # Combine all context parts
+            full_context = '\n'.join(context_parts).strip()
+            
+            if not full_context:
+                full_context = "No specific context available for this query."
+            
+            # Format the prompt for Llama 3
+            messages = [
+                {"role": "system", "content": "You are a helpful AI assistant for Jupiter. Provide accurate and concise answers based on the given context."},
+                {"role": "user", "content": f"""Use the following context to answer the question. If the answer isn't in the context, say so.
+                
+Context:
+{full_context}
 
 Question: {query}
 
-Please provide a detailed response of 3-5 sentences that directly answers the question using the context. Be informative and thorough in your explanation.
-
-Answer:"""
+Answer concisely (2-4 sentences). If multiple perspectives exist, mention them briefly."""}
+            ]
             
-            print("   Tokenizing input...")
-            # Tokenize the input and ensure it's on the correct device
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=1024,  # Increased max length for longer context
-                return_attention_mask=True
+            # Apply chat template
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
             )
             
-            # Move all tensors to the same device as the model
-            print(f"   Moving tensors to {self.device}...")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            print("   Generating response with Llama 3...")
             
-            # Generate response with adjusted parameters for better quality
-            print("   Generating text...")
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=300,  # Increased for longer responses
-                    temperature=0.7,
-                    do_sample=True,
-                    top_p=0.95,  # Slightly higher for more diverse responses
-                    top_k=50,    # Limit to top-k tokens
-                    num_return_sequences=1,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    no_repeat_ngram_size=3,
-                    length_penalty=1.2,  # Encourage longer responses
-                    repetition_penalty=1.1  # Reduce repetition
-                )
+            # Generate response using the pipeline
+            response = self.generator(
+                prompt,
+                max_new_tokens=512,
+                temperature=0.7,
+                top_p=0.9,
+                top_k=50,
+                do_sample=True,
+                num_return_sequences=1,
+                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.eos_token_id,
+                repetition_penalty=1.1
+            )
             
-            print("   Decoding response...")
-            # Decode the full response
-            input_length = inputs['input_ids'].shape[1]
-            response = self.tokenizer.decode(
-                outputs[0][input_length:],
-                skip_special_tokens=True
-            ).strip()
+            # Extract the response text
+            response_text = response[0]['generated_text']
             
-            # Clean up the response while preserving multiple sentences
-            # First, split into sentences and keep only complete ones
-            sentences = [s.strip() for s in response.split('. ') if s.strip()]
-            if sentences:
-                # Join sentences with periods and add a final period
-                response = '. '.join(sentences) + ('' if response.endswith('.') else '.')
+            # Remove the input prompt from the response
+            if prompt in response_text:
+                response_text = response_text.replace(prompt, "").strip()
+            
+            # Clean up the response
+            response_text = response_text.split('</s>')[0].strip()  # Remove any trailing tokens
+            response_text = re.sub(r'\s+', ' ', response_text)  # Normalize whitespace
+            
+            # Ensure the response ends with proper punctuation
+            if response_text and not response_text.endswith(('.', '!', '?')):
+                response_text += '.'
             
             # Translate back to original language if needed
             if language != "en":
                 print("   Translating response...")
-                response = self.translate_from_english(response, language)
-                
-            return response
+                response_text = self.translate_from_english(response_text, language)
+            
+            return response_text
             
         except Exception as e:
             import traceback
             print(f"Error in generate_response: {str(e)}")
             print(traceback.format_exc())
-            # Return a fallback response with context if available
+            # Return a fallback response
             if context:
                 return f"Here's what I found: {context[:500]}{'...' if len(context) > 500 else ''}"
             return "I'm sorry, I encountered an error while generating a response. Please try again later."
 
-    def get_related_queries(self, query: str, top_k: int = 5) -> List[str]:
-        """Get related queries based on semantic similarity."""
+    def generate_related_queries(self, query: str, context: str, num_queries: int = 2) -> List[str]:
+        """Generate related queries using the LLM based on the original query and context."""
         try:
-            print(f"Getting related queries for: {query}")
-            # Get similar queries from the knowledge base
-            results = self.semantic_search(query, top_k=top_k)
-            related = []
+            print(f"Generating {num_queries} related queries for: {query}")
             
-            for result in results:
-                # Handle both dictionary and object-style access
-                metadata = result.get('metadata', {}) if isinstance(result, dict) else getattr(result, 'metadata', {})
-                if isinstance(metadata, dict) and 'related_queries' in metadata:
-                    if isinstance(metadata['related_queries'], list):
-                        related.extend(metadata['related_queries'])
-                    elif isinstance(metadata['related_queries'], str):
-                        # If it's a string, try to parse it as JSON
-                        try:
-                            parsed = json.loads(metadata['related_queries'])
-                            if isinstance(parsed, list):
-                                related.extend(parsed)
-                        except json.JSONDecodeError:
-                            print(f"Could not parse related_queries: {metadata['related_queries']}")
+            # Create a prompt for generating related queries
+            prompt = f"""Given the following question and context, generate {num_queries} related questions that someone might also want to ask. 
+            Make sure the questions are relevant and specific to the context.
             
-            # Ensure we return a list of strings
-            related = [str(q).strip() for q in related if q and str(q).strip()]
-            # Remove duplicates and limit to 2
-            unique_related = list(dict.fromkeys(related))[:2]
-            print(f"Found related queries: {unique_related}")
-            return unique_related
+            Original Question: {query}
+            
+            Context: {context}
+            
+            Generate exactly {num_queries} related questions, one per line:"""
+            
+            # Tokenize the prompt
+            inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=1024)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # Generate related queries
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=150,  # Enough for several questions
+                    temperature=0.8,     # Slightly higher for more diverse questions
+                    do_sample=True,
+                    top_p=0.9,
+                    top_k=50,
+                    num_return_sequences=1,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+            
+            # Decode the response
+            response = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+            
+            # Parse the response to extract questions
+            questions = [q.strip() for q in response.split('\n') if q.strip()]
+            questions = [q for q in questions if q and q[0].isdigit() or q[0] == '-']  # Filter out non-question lines
+            
+            # Clean up the questions
+            questions = [re.sub(r'^\d+[\.\)\-]?\s*', '', q).strip() for q in questions]
+            questions = [q for q in questions if q and q[-1] == '?']  # Keep only questions
+            
+            # Limit to the requested number of questions
+            questions = questions[:num_queries]
+            
+            # If we didn't get enough questions, generate more
+            if len(questions) < num_queries:
+                remaining = num_queries - len(questions)
+                additional = self.generate_related_queries(query, context, remaining)
+                questions.extend(additional)
+                questions = questions[:num_queries]  # Ensure we don't exceed the limit
+                
+            print(f"Generated related queries: {questions}")
+            return questions
             
         except Exception as e:
-            print(f"Error getting related queries: {e}")
-            import traceback
-            print(traceback.format_exc())
+            print(f"Error in generate_related_queries: {str(e)}")
             return []
-
-    def process_query(self, query: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+            
+    def get_related_queries(self, query: str, context: str = "", num_queries: int = 2) -> List[str]:
+        """Get previous queries as related queries."""
+        try:
+            print("Getting previous queries as related queries...")
+            
+            # Get previous queries (excluding current one)
+            previous_queries = [q for q in self.query_history if q.lower() != query.lower()]
+            
+            # Return up to num_queries previous queries (most recent first)
+            related = previous_queries[-(num_queries):]
+            
+            # If we don't have enough previous queries, just return what we have
+            print(f"   Returning previous queries as related: {related}")
+            return related
+            
+        except Exception as e:
+            print(f"Error in get_related_queries: {str(e)}")
+            return []
+    
+    def get_score(self, match):
+        """Helper method to get score from a match (dict or object)."""
+        if isinstance(match, dict):
+            return match.get('score', 0)
+        return getattr(match, 'score', 0)
+    
+    def process_query(self, query: str, language: str = None) -> Dict[str, Any]:
+        """Process a user query and return a response with answer, source, and related queries."""
+        start_time = time.time()
         try:
             print(f"\n=== Starting query processing ===")
             print(f"Query: {query}")
             
+            # Add current query to history (before processing)
+            self.query_history.append(query)
+            # Keep only the most recent queries
+            self.query_history = self.query_history[-self.max_history:]
+            
             # Language detection
             print("\n1. Detecting language...")
-            language = self.detect_language(query)
+            if language is None:
+                language = self.detect_language(query)
             print(f"   Detected language: {language}")
             
             # Translation if needed
             if language != "en":
-                print(f"\n2. Translating to English...")
+                print("\n2. Translating to English...")
                 query_en = self.translate_to_english(query, language)
                 print(f"   Translated query: {query_en}")
             else:
                 query_en = query
                 
             # Semantic search
-            print(f"\n3. Performing semantic search...")
-            results = self.semantic_search(query_en, self.top_k)
+            print("\n3. Performing semantic search...")
+            results = self.semantic_search(query_en, top_k=self.top_k)
             print(f"   Found {len(results)} matches")
             
             # Filter results
             print(f"\n4. Filtering results (threshold: {self.score_threshold})...")
-            
-            # Helper function to safely get score from either dict or object
-            def get_score(match):
-                if isinstance(match, dict):
-                    return match.get('score', 0)
-                return getattr(match, 'score', 0)
-            
-            # Filter results using the helper function
-            filtered_results = [r for r in results if get_score(r) >= self.score_threshold]
+            filtered_results = [r for r in results if self.get_score(r) >= self.score_threshold]
             
             if not filtered_results and results:
-                first_score = get_score(results[0])
+                first_score = self.get_score(results[0])
                 print(f"   No results above threshold, using top result (score: {first_score:.3f})")
                 filtered_results = [results[0]]
             else:
                 print(f"   Found {len(filtered_results)} results above threshold")
-                
-            # Prepare context
-            context = ""
-            source = None
-            if filtered_results:
-                best_match = max(filtered_results, key=get_score)
-                
-                # Safely get metadata from either dict or object
-                if isinstance(best_match, dict):
-                    metadata = best_match.get('metadata', {})
-                    context = metadata.get('text', '')
-                    source = metadata.get('source', 'Unknown source')
-                    score = best_match.get('score', 0)
-                else:
-                    metadata = getattr(best_match, 'metadata', {}) or {}
-                    context = getattr(metadata, 'text', '')
-                    source = getattr(metadata, 'source', 'Unknown source')
-                    score = getattr(best_match, 'score', 0)
-                
-                print(f"   Best match score: {score:.3f}")
-                print(f"   Context length: {len(context)} characters")
-                print(f"   Source: {source}")
-                print(f"   Metadata type: {type(metadata).__name__}")
-                if hasattr(metadata, '__dict__'):
-                    print(f"   Metadata attributes: {vars(metadata).keys()}")
-                elif isinstance(metadata, dict):
-                    print(f"   Metadata keys: {list(metadata.keys())}")
-            else:
-                print("   No valid context found")
             
-            # Generate response
-            print(f"\n5. Generating response...")
-            answer = self.generate_response(query_en, context, language)
+            # Prepare context from all relevant search results
+            context_parts = []
+            sources = []
+            scores = []
+            best_match = None
+            
+            if filtered_results:
+                print(f"   Processing {len(filtered_results)} filtered results...")
+                # Sort results by score in descending order
+                filtered_results.sort(key=self.get_score, reverse=True)
+                best_match = filtered_results[0]  # Keep track of best match for source
+                
+                # Use all filtered results for context
+                for i, result in enumerate(filtered_results, 1):
+                    try:
+                        if isinstance(result, dict):
+                            metadata = result.get('metadata', {})
+                            text = metadata.get('text', '')
+                            if not text:
+                                text = metadata.get('content', '')  # Try alternative field names
+                            text = str(text).strip()  # Ensure text is a string and strip whitespace
+                            title = str(metadata.get('title', '')).strip()
+                            score = float(result.get('score', 0))
+                            
+                            # Debug log each result
+                            print(f"   - Result {i}: score={score:.3f}, has_text={bool(text)}, has_title={bool(title)}")
+                            
+                            # Include result even if text is empty, but prefer results with text
+                            context_text = f"Title: {title}\nContent: {text}" if title else text
+                            if context_text.strip():
+                                context_parts.append(
+                                    f"--- Result {i} (Relevance: {score:.2f}) ---\n"
+                                    f"{context_text}\n"
+                                )
+                                sources.append(metadata.get('source'))
+                                scores.append(score)
+                                print(f"   - Added result {i} to context")
+                            else:
+                                print(f"   - Skipping empty result {i}")
+                    except Exception as e:
+                        print(f"   - Error processing result {i}: {str(e)}")
+                        continue
+                
+                # Combine all context parts
+                context = '\n'.join(context_parts) if context_parts else None
+                
+                # Get the best source (from highest scoring result with a source)
+                source = next((s for s in sources if s), None)
+                
+                print(f"   Using context from {len(context_parts)} relevant results (best score: {max(scores) if scores else 0:.3f})")
+                if not context_parts:
+                    print("   Warning: No valid context was extracted from the search results")
+            else:
+                print("   No filtered results available, will attempt to generate response without specific context")
+                context = f"User asked: {query_en}"  # Fallback context
+                source = None
+                
+            # Fallback if no context was extracted but we have results
+            if not context and filtered_results:
+                print("   No valid context extracted, using raw results as fallback")
+                context = "\n".join([
+                    f"--- Result {i} ---\n{json.dumps(r, indent=2, default=str)}" 
+                    for i, r in enumerate(filtered_results[:3], 1)
+                ])
+            
+            # Generate response with search results for better context
+            print("\n5. Generating response...")
+            answer = self.generate_response(
+                query=query_en, 
+                context=context, 
+                language=language,
+                search_results=filtered_results  # Pass all filtered results for context
+            )
             print(f"   Generated response: {answer[:150]}...")
             
-            # Get related queries (limit to 2)
-            print(f"\n6. Finding related queries...")
-            related_queries = []
-            if context:
-                related_queries = self.get_related_queries(query_en)[:2]  # Limit to 2 related queries
-                print(f"   Found {len(related_queries)} related queries: {related_queries}")
-            else:
-                print("   No context available for related queries")
+            # Get related queries using the full context from search results
+            print("\n6. Getting related queries...")
+            related_queries = self.get_related_queries(query_en, context, num_queries=2)
+            print(f"   Found {len(related_queries)} related queries")
             
-            # Extract source URL from the best match
-            source_url = None
-            if filtered_results:
-                best_match = max(filtered_results, key=get_score)
-                if isinstance(best_match, dict):
-                    source_url = best_match.get('metadata', {}).get('source')
-                else:
-                    source_url = getattr(getattr(best_match, 'metadata', {}), 'source', None)
-            
-            # Prepare search results for debug info
-            search_results_debug = []
-            for i, result in enumerate(filtered_results, 1):
-                if isinstance(result, dict):
-                    search_results_debug.append({
-                        'rank': i,
-                        'id': result.get('id', 'N/A'),
-                        'score': result.get('score', 0),
-                        'text': (result.get('metadata', {}).get('text', '')[:200] + '...') if result.get('metadata', {}).get('text') else 'N/A',
-                        'source': result.get('metadata', {}).get('source', 'N/A')
-                    })
-            
-            # Prepare the response in the desired format
+            # Prepare the response with additional metadata
             response = {
                 "answer": answer,
-                "source": source_url if source_url else source,  # Prefer source_url if available
-                "related_queries": related_queries[:2],  # Ensure only 2 related queries
-                "debug": {
-                    "search_results": search_results_debug,
-                    "top_search_result": {
-                        "id": best_match.get('id', 'N/A') if filtered_results else None,
-                        "score": best_match.get('score', 0) if filtered_results else None,
-                        "context": context[:500] + ('...' if len(context) > 500 else '') if context else "",
-                        "source": source,
-                        "source_url": source_url if source_url else None
-                    } if filtered_results else None,
-                    "query_language": language,
-                    "query_translated": query_en if language != "en" else "N/A (already in English)",
-                    "timestamp": datetime.now().isoformat()
-                }
+                "source": source,
+                "related_queries": related_queries,
+                "response_time": (time.time() - start_time) * 1000,  # in milliseconds
+                "search_results_count": len(filtered_results),
+                "best_match_score": self.get_score(best_match) if best_match else None
             }
             
             print("\n=== Query processing complete ===\n")
-            print("=== DEBUG: Top Search Result ===")
-            print(f"Score: {response['debug']['top_search_result']['score'] if response['debug']['top_search_result'] else 'N/A'}")
-            print(f"Context: {response['debug']['top_search_result']['context'] if response['debug']['top_search_result'] else 'N/A'}")
-            print(f"Source: {response['debug']['top_search_result']['source'] if response['debug']['top_search_result'] else 'N/A'}")
-            print("================================\n")
-            
             return response
             
         except Exception as e:
-            print(f"Error in process_query: {e}")
+            print(f"Error in process_query: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {
                 "answer": "I'm having trouble processing your request. Please try again later.",
                 "source": None,
-                "related_queries": []
+                "related_queries": [],
+                "response_time": (time.time() - start_time) * 1000
             }
 
 # Initialize the Flask app

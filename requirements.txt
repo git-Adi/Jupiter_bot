@@ -27,9 +27,26 @@ python-dotenv==1.0.0
 langdetect==1.0.9
 translate==3.6.1
 requests==2.31.0
+
+# PyTorch with CPU/GPU support
 torch>=2.0.0
-transformers>=4.30.0
-huggingface-hub>=0.16.4
-accelerate>=0.20.0
+
+# Transformers and model-related
+transformers>=4.36.0
+huggingface-hub>=0.19.4
+accelerate>=0.25.0
+bitsandbytes>=0.41.0
+
+tiktoken  # For token counting
+safetensors>=0.3.1
 bitsandbytes>=0.40.0
+safetensors>=0.4.0
+
+# Optional: Uncomment these if you have CUDA and want better performance
+# torch>=2.0.0+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+# xformers>=0.0.22
+# flash-attn --no-build-isolation
+
+# Pinecone
 pinecone
+huggingface-hub
