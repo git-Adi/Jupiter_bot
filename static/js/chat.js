@@ -33,7 +33,7 @@ document.addEventListener('DOMContentLoaded', function() {
         showTypingIndicator();
         
         // Send message to server
-        fetch('/ask', {
+        fetch('/query', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

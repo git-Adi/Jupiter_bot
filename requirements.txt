@@ -1,16 +1,35 @@
+# flask==2.3.3
+# flask-cors==4.0.0
+# sentence-transformers==2.2.2
+# pinecone-client>=2.2.4,<3.0.0
+# numpy==1.24.3
+# gunicorn==21.2.0
+# python-dotenv==1.0.0
+# langdetect==1.0.9
+# translate==3.6.1
+# requests==2.31.0
+# torch==1.13.1
+# transformers==4.30.2
+# huggingface-hub==0.16.4
+# ollama==0.1.5
+# requests==2.31.0
+# pinecone
+# accelerate>=0.20.0
+# bitsandbytes>=0.40.0
+# huggingface-hub>=0.16.4
+
 flask==2.3.3
 flask-cors==4.0.0
-sentence-transformers==2.2.2
+sentence-transformers>=2.2.2
 pinecone-client>=2.2.4,<3.0.0
-numpy==1.24.3
-gunicorn==21.2.0
+numpy>=1.26.0
 python-dotenv==1.0.0
 langdetect==1.0.9
 translate==3.6.1
 requests==2.31.0
-torch==1.13.1
-transformers==4.30.2
-huggingface-hub==0.16.4
-ollama==0.1.5
-requests==2.31.0
+torch>=2.0.0
+transformers>=4.30.0
+huggingface-hub>=0.16.4
+accelerate>=0.20.0
+bitsandbytes>=0.40.0
 pinecone
